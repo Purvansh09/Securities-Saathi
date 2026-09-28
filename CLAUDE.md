@@ -106,7 +106,18 @@ Rules: dedupe on ISIN (a stock on both exchanges is one row, both symbols in `me
      pagination landing exactly on all 49 rows).
 4. Price refresh job, price and history endpoints (history endpoint exists; job doesn't --
    same network problem as the sync, tackle together)
-5. Transaction CRUD with ledger validation (rule 5)
+5. ✅ Transaction CRUD with ledger validation (rule 5)
+   - `app/api/v1/transactions.py`: `POST/GET/PATCH/DELETE /transactions`, `GET /transactions/{id}`.
+     Every write goes through `services/ledger.py::run_guarded` (advisory lock scoped to
+     `(user_id, security_id)`, apply the change, check `ledger_balance_ok`, 422 on violation --
+     the lock+check wrap the whole DB transaction so a failed check rolls back the write too).
+     PATCH only allows correcting quantity/price/charges/executed_at/notes, never `txn_type`
+     or `isin` -- changing what was bought/sold is a new transaction. DELETE is a soft delete
+     (rule 2). 19 tests against a fake connection, plus the real SQL text (insert...returning,
+     the joined list/get select, the dynamic-SET update, the soft-delete update) verified
+     against the live database: a real oversell and a real delete-of-a-depended-on-BUY both
+     correctly flipped `ledger_balance_ok` to false, and a legitimate delete correctly set
+     `deleted_at` and left the ledger valid. All test data cleaned up afterward.
 6. Portfolio: FIFO service, summary, holdings, allocation
 7. Frontend: login, dashboard with totals by asset class, security search, add-transaction form, holdings table
 
