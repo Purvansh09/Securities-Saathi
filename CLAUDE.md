@@ -89,10 +89,23 @@ Daily job merges these sources into `securities`, keyed by ISIN. URLs and file f
 Rules: dedupe on ISIN (a stock on both exchanges is one row, both symbols in `metadata`). Mark securities that vanish from the lists `is_active = false`, never delete them. If a sync inserts an ISIN that exists as a custom security, promote it (`is_custom = false`, `created_by = null`).
 
 ## Phase 1 scope and build order
-1. Scaffold repo and config, create the Supabase project, apply the migration
-2. Auth: JWT verification dependency, `GET/PATCH /me`
+1. ✅ Scaffold repo and config, create the Supabase project, apply the migration
+2. ✅ Auth: JWT verification dependency, `GET/PATCH /me`
 3. Securities sync (NSE, BSE, AMFI) and the securities search endpoints
-4. Price refresh job, price and history endpoints
+   - Sync job: **not done, can't run from this sandbox** -- its egress is allowlisted to package
+     registries and GitHub only; NSE/BSE/AMFI/Yahoo Finance are all outside it (confirmed
+     directly). Stood in for now with `supabase/seed.sql`: 49 real, individually-verified
+     securities (42 Nifty 50 stocks from NSE's own constituent CSV, 4 ETFs, 2 MFs, 1 bond).
+     The real sync needs to run somewhere with normal internet -- your machine, or a GitHub
+     Actions cron -- and should upsert on ISIN so it merges cleanly with the seed data.
+   - ✅ Search endpoints (`app/api/v1/securities.py`): `GET /securities` (search by name/
+     symbol/ISIN prefix, type filter, cursor pagination), `GET /securities/{isin}`,
+     `GET /securities/{isin}/price`, `GET /securities/{isin}/history`. 14 tests against a
+     fake connection, plus the actual search/filter/pagination SQL verified against the
+     live seeded data (ticker match, name substring, ISIN prefix, type filter, and
+     pagination landing exactly on all 49 rows).
+4. Price refresh job, price and history endpoints (history endpoint exists; job doesn't --
+   same network problem as the sync, tackle together)
 5. Transaction CRUD with ledger validation (rule 5)
 6. Portfolio: FIFO service, summary, holdings, allocation
 7. Frontend: login, dashboard with totals by asset class, security search, add-transaction form, holdings table
