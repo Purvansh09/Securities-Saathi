@@ -46,7 +46,10 @@ frontend/
 14. **Secrets** are never committed. Keep `.env` in `.gitignore` and maintain `.env.example`.
 
 ## Data model
-Full DDL is in `supabase/migrations/20260928130000_phase1_schema.sql`.
+Full DDL is in `supabase/migrations/20260928130000_phase1_schema.sql`, hardened by
+`20260928134500_harden_functions.sql` (pins `search_path` on the SQL/PLpgSQL functions, revokes
+direct RPC execution on the two trigger-only functions). Both are applied to the live "Securities
+Saathi" project; the Supabase security advisor reports zero lints as of the second migration.
 
 | Table / view | Purpose |
 |---|---|
@@ -109,9 +112,14 @@ Done when: migrations apply cleanly to a fresh Supabase project, tests pass, and
 - Do not add dependencies without a reason.
 - Update this file when a decision changes.
 
-## Commands (update once scaffolded)
+## Commands
 ```
-cd backend && uvicorn app.main:app --reload
-cd backend && pytest
-supabase db push
+cd backend && python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cp backend/.env.example backend/.env   # then fill in the real secrets, see comments in that file
+cd backend && source .venv/bin/activate && uvicorn app.main:app --reload
+cd backend && source .venv/bin/activate && pytest -q
 ```
+New migrations are applied with the Supabase MCP `apply_migration` tool (project: Securities Saathi,
+id `vmonemnomwyjwacagkuc`, region ap-south-1, org "purvansh playground") rather than the Supabase CLI,
+since this was built without local Docker. Keep the SQL file in `supabase/migrations/` in sync with
+whatever gets applied -- that file is the record of the schema, the live project is just where it runs.
