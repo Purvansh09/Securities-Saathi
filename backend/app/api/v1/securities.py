@@ -8,12 +8,14 @@ bypasses RLS (CLAUDE.md rule 13), so that rule has to be repeated here in
 every query rather than left to Postgres.
 """
 
-import base64
 from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
+from app.api.v1.pagination import ISIN_PATTERN
+from app.api.v1.pagination import decode_cursor as _decode_cursor
+from app.api.v1.pagination import encode_cursor as _encode_cursor
 from app.core.auth import get_current_user_id
 from app.core.db import get_db
 from app.schemas.security import (
@@ -27,25 +29,6 @@ from app.schemas.security import (
 )
 
 router = APIRouter(prefix="/securities", tags=["securities"])
-
-ISIN_PATTERN = r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$"  # must match the DB check constraint (see the Phase 1 migration)
-
-
-def _encode_cursor(offset: int) -> str:
-    return base64.urlsafe_b64encode(str(offset).encode()).decode()
-
-
-def _decode_cursor(cursor: str | None) -> int:
-    if cursor is None:
-        return 0
-    try:
-        offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid cursor") from exc
-    if offset < 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid cursor")
-    return offset
-
 
 @router.get("", response_model=SecurityList)
 async def list_securities(

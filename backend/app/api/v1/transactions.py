@@ -8,12 +8,14 @@ by the user_id from the verified JWT, never anything from the request
 (rule 13); DELETE is a soft delete, never a real one.
 """
 
-import base64
 from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
+from app.api.v1.pagination import ISIN_PATTERN
+from app.api.v1.pagination import decode_cursor as _decode_cursor
+from app.api.v1.pagination import encode_cursor as _encode_cursor
 from app.core.auth import get_current_user_id
 from app.core.db import get_db
 from app.schemas.transaction import (
@@ -27,8 +29,6 @@ from app.schemas.transaction import (
 from app.services.ledger import LedgerViolation, run_guarded
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
-
-ISIN_PATTERN = r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$"
 
 _TXN_OUT_COLUMNS = "id, txn_type, quantity, price, charges, executed_at, notes, source, created_at, updated_at"
 
@@ -47,22 +47,6 @@ def _row_to_out(row: dict) -> TransactionOut:
     data["price"] = str(data["price"])
     data["charges"] = str(data["charges"])
     return TransactionOut(**data)
-
-
-def _encode_cursor(offset: int) -> str:
-    return base64.urlsafe_b64encode(str(offset).encode()).decode()
-
-
-def _decode_cursor(cursor: str | None) -> int:
-    if cursor is None:
-        return 0
-    try:
-        offset = int(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid cursor") from exc
-    if offset < 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid cursor")
-    return offset
 
 
 async def _resolve_visible_security_id(conn: asyncpg.Connection, isin: str, user_id: UUID) -> UUID:
