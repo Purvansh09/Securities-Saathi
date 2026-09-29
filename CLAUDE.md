@@ -118,7 +118,29 @@ Rules: dedupe on ISIN (a stock on both exchanges is one row, both symbols in `me
      against the live database: a real oversell and a real delete-of-a-depended-on-BUY both
      correctly flipped `ledger_balance_ok` to false, and a legitimate delete correctly set
      `deleted_at` and left the ledger valid. All test data cleaned up afterward.
-6. Portfolio: FIFO service, summary, holdings, allocation
+6. ✅ Portfolio: FIFO service, summary, holdings, allocation
+   - `services/fifo.py` (pure): matches SELLs against the oldest BUY lots, same ordering as
+     `ledger_balance_ok`. Buy charges go into lot cost; sell charges reduce proceeds; partial
+     splits are pro rata with the last slice taking the remainder, quantized to 10 dp
+     internally so later sums stay exact (at 28-digit default precision, 31/3 x 3 came back
+     as 30.999...). Holding days use IST dates (rule 11). 17 tests.
+   - `services/valuation.py` (pure, valuation date passed in): holdings with no price yet are
+     carried at cost (market_value null, counted in `unpriced_holdings`) instead of dropping
+     out of totals. Bonds without a price are face value + accrued interest, 30/360,
+     coupon dates stepped back from maturity (semi-annual default), flagged `estimated`
+     (rule 10). Face value defaults to 100; `face_value`/`coupon_frequency` in metadata
+     override. 21 tests.
+   - `app/api/v1/portfolio.py`: `GET /portfolio/summary`, `/holdings?type=` (sorted by value,
+     weights always relative to the whole portfolio), `/holdings/{isin}` (open lots +
+     realised matches, 404 if never traded), `/allocation?by=asset_class|sector` (missing
+     sector -> "Unclassified"). One ledger query per request; nothing is stored. Outputs are
+     formatted to 6 dp (the DB's scale); display rounding stays in the frontend. 16 tests,
+     plus the real query run on the live DB (throwaway user, 4 securities, a soft-deleted
+     row that must be ignored, two prices for one security) and its rows fed through the
+     pipeline: every total matched the hand-computed figures. Test data cleaned up.
+   - Fixed alongside: the asyncpg pool now registers json/jsonb codecs (`core/db.py`).
+     Without them jsonb came back as str, which would have broken `metadata` on
+     `GET /securities/{isin}` and `preferences` on `/me` against the real DB.
 7. Frontend: login, dashboard with totals by asset class, security search, add-transaction form, holdings table
 
 Out of scope for Phase 1: Excel import, statements, XIRR, tax, risk score.
