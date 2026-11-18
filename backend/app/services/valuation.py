@@ -32,6 +32,7 @@ class SecurityRef:
     type: str
     sector: str | None
     metadata: dict[str, Any]
+    exchange: str | None = None  # listed vs unlisted matters for tax (services/tax/engine.py)
 
 
 @dataclass(frozen=True)

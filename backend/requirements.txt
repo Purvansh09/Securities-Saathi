@@ -4,8 +4,14 @@ asyncpg==0.30.0
 pydantic==2.10.4
 pydantic-settings==2.7.1
 pyjwt==2.10.1
+cryptography==50.0.1   # PyJWT needs it to verify ES256/RS256 tokens (Supabase asymmetric signing keys)
+httpx==0.28.1          # downloads for the securities sync (also used by the tests)
+anthropic==1.11.0      # LLM fallback for unrecognised import files (services/imports/llm.py)
+pandas==3.0.6          # reading .xlsx imports (CLAUDE.md: rule-based pandas parsing first)
+openpyxl==3.1.5        # pandas' .xlsx engine
+python-multipart==0.0.32  # FastAPI file uploads
+fpdf2==2.8.9           # PDF statements (services/statements.py)
 
 # tests
 pytest==8.3.4
 pytest-asyncio==0.25.0
-httpx==0.28.1

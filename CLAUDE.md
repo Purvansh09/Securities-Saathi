@@ -80,32 +80,69 @@ Later phases: `/imports/*`, `/reports/*`, `/analysis/xirr`, `/tax/*`.
 ## Securities sync
 Daily job merges these sources into `securities`, keyed by ISIN. URLs and file formats change often, so verify each one on the publisher's site before coding against it, and make the sync fail loudly if expected columns disappear.
 - NSE equity list CSV (`EQUITY_L.csv` on nsearchives.nseindia.com). Needs a browser-like User-Agent header. Do not scrape the live NSE pages.
-- BSE "List of Scrips" download (also gives industry, used as sector)
-- ETFs: NSE ETF list plus BSE scrip list
-- Mutual funds: AMFI `NAVAll.txt`. Each ISIN is its own security (growth and dividend options differ). Store the scheme code in `metadata`. Skip rows with no ISIN
-- Bonds: NSE/BSE debt segment lists, plus user-added custom securities
-- Prices: exchange bhavcopy or yfinance (`SYMBOL.NS`) for stocks and ETFs, AMFI NAV for MFs
+- ~~BSE "List of Scrips" download~~ -- **blocked** (403 from BSE's bot protection even with
+  browser headers, checked 2026-09-29). Replaced by: BSE bhavcopy (UDiFF CSV) for BSE symbols/codes
+  and BSE-only equities (ISIN security-type `01` only, so NCDs/bonds stay out), and NSE's
+  `ind_nifty500list.csv` "Industry" column for sector (top 500 companies; others Unclassified).
+- ETFs: NSE `eq_etfseclist.csv`. An ETF is also an AMFI scheme; it stays type ETF, AMFI adds its scheme code/AMC to metadata
+- Mutual funds: AMFI `NAVAll.txt`. Each ISIN is its own security (growth and dividend options differ). Store the scheme code in `metadata`. Skip rows with no ISIN.
+  Format as of 2026-09: 8 `;` columns, now with separate **Plan** and **Option** columns
+- Bonds: not synced yet (seed + user-added custom securities). NSE/BSE debt lists are a later addition
+- Prices: NSE bhavcopy (UDiFF zip), then BSE bhavcopy for what NSE lacks, AMFI NAV for MFs only (ETFs use market price). No yfinance needed
 
 Rules: dedupe on ISIN (a stock on both exchanges is one row, both symbols in `metadata`). Mark securities that vanish from the lists `is_active = false`, never delete them. If a sync inserts an ISIN that exists as a custom security, promote it (`is_custom = false`, `created_by = null`).
+
+Implementation: `backend/app/services/securities_sync/` (sources -> merge -> store, orchestrated by
+jobs). Safety: missing columns raise `SourceFormatError`; core sources below a row floor abort
+before writing; a run that would deactivate > 5% of synced rows rolls back. Deactivation only
+applies to NSE/AMFI rows of types STOCK/ETF/MF (BSE-only rows come from a daily trade file, and
+bonds aren't synced). Metadata is merged (`||`), never replaced; sector is only overwritten with a
+non-null value; existing ETF names are kept. Hand-entered (`MANUAL`) prices are never overwritten.
+Price history is pruned to 7 days for securities with no transactions (about 20k prices/day
+would fill the free tier's 500 MB in about a year), but a security's latest price is never pruned.
 
 ## Phase 1 scope and build order
 1. ✅ Scaffold repo and config, create the Supabase project, apply the migration
 2. ✅ Auth: JWT verification dependency, `GET/PATCH /me`
-3. Securities sync (NSE, BSE, AMFI) and the securities search endpoints
-   - Sync job: **not done, can't run from this sandbox** -- its egress is allowlisted to package
-     registries and GitHub only; NSE/BSE/AMFI/Yahoo Finance are all outside it (confirmed
-     directly). Stood in for now with `supabase/seed.sql`: 49 real, individually-verified
-     securities (42 Nifty 50 stocks from NSE's own constituent CSV, 4 ETFs, 2 MFs, 1 bond).
-     The real sync needs to run somewhere with normal internet -- your machine, or a GitHub
-     Actions cron -- and should upsert on ISIN so it merges cleanly with the seed data.
+   - The project signs user tokens with **asymmetric ES256 keys**, not the legacy shared secret.
+     `core/auth.py` routes on the token header: ES256/RS256 are verified against the public key
+     from `{SUPABASE_URL}/auth/v1/.well-known/jwks.json` (matched by `kid`, cached 10 min, sent
+     with `SUPABASE_PUBLISHABLE_KEY` as `apikey`); HS256 is verified only against
+     `SUPABASE_JWT_SECRET` (old tokens). Anything else, including `alg: none`, is 401. HS256 is
+     never checked against a public key, which blocks algorithm-confusion forgery. A JWKS fetch
+     failure returns 503, not 401. Needs `cryptography`. Tests cover each case.
+   - `SUPABASE_URL` must be the bare project URL, with no `/rest/v1/` suffix.
+3. ✅ Securities sync (NSE, BSE, AMFI) and the securities search endpoints
+   - Sync job: see "Securities sync" above. Run: `python -m app.services.securities_sync sync`
+     or `POST /api/v1/internal/sync-securities` with `X-Internal-Secret`. First live run
+     (2026-09-29): 22,743 securities (2,587 NSE stocks, 1,985 BSE-only stocks, 351 ETFs,
+     17,820 MF ISINs), merged over the 49 seed rows in 10 s; re-run inserts 0, deactivates 0.
+     The seed (`supabase/seed.sql`) stays as a fallback for a fresh project.
+   - **Scheduled (temporary): Windows Task Scheduler** on the dev laptop, task
+     "Securities Saathi - daily sync", Mon-Fri 8:00 pm IST (after exchange/AMFI files publish),
+     runs `backend/scripts/run_daily_sync.ps1` (sync + prices, logs to `backend/logs/`, keeps 30,
+     exits non-zero on failure -> Task Scheduler "Last Run Result"). Catches up at next logon if
+     the laptop was off; allowed on battery; needs network. Check it with
+     `Get-ScheduledTaskInfo -TaskName "Securities Saathi - daily sync"`.
+   - **Planned: move to a GitHub Actions cron** (`30 14 * * 1-5` = 8 pm IST) running
+     `python -m app.services.securities_sync all` with `DATABASE_URL` as a repo secret. Needs the
+     repo pushed to GitHub first. Unregister the Windows task once that's running, so the two
+     don't both run.
    - ✅ Search endpoints (`app/api/v1/securities.py`): `GET /securities` (search by name/
      symbol/ISIN prefix, type filter, cursor pagination), `GET /securities/{isin}`,
      `GET /securities/{isin}/price`, `GET /securities/{isin}/history`. 14 tests against a
      fake connection, plus the actual search/filter/pagination SQL verified against the
      live seeded data (ticker match, name substring, ISIN prefix, type filter, and
      pagination landing exactly on all 49 rows).
-4. Price refresh job, price and history endpoints (history endpoint exists; job doesn't --
-   same network problem as the sync, tackle together)
+4. ✅ Price refresh job, price and history endpoints
+   - `python -m app.services.securities_sync prices [--date YYYY-MM-DD]` or
+     `POST /api/v1/internal/refresh-prices`. Walks back over weekends/holidays to the latest
+     bhavcopy. First run: 22,736 prices (NSE 2,939, BSE 2,003, AMFI 17,794); every active MF has
+     a price; 1,126 bhavcopy rows unmatched (bonds/SGBs, not in the master). A first version
+     pruned stale-but-latest NAVs; fixed, and the prune now always keeps each latest price.
+   - 14 unit tests (`tests/test_securities_sync.py`) on fixtures cut from the real files:
+     column checks, AMFI sections/options/N.A. NAVs, ISIN type filter, merge precedence, price
+     precedence (NSE EQ series > NSE > BSE > AMFI), row floors, endpoint secret.
 5. ✅ Transaction CRUD with ledger validation (rule 5)
    - `app/api/v1/transactions.py`: `POST/GET/PATCH/DELETE /transactions`, `GET /transactions/{id}`.
      Every write goes through `services/ledger.py::run_guarded` (advisory lock scoped to
@@ -142,8 +179,90 @@ Rules: dedupe on ISIN (a stock on both exchanges is one row, both symbols in `me
      Without them jsonb came back as str, which would have broken `metadata` on
      `GET /securities/{isin}` and `preferences` on `/me` against the real DB.
 7. Frontend: login, dashboard with totals by asset class, security search, add-transaction form, holdings table
+   - Built in `frontend/` (Vite 8, React 19, TS, TanStack Query 5, Recharts 3, react-router 7 for the
+     four pages). supabase-js is used for auth only; every data call goes to the FastAPI backend
+     with the session's JWT (`src/lib/api.ts`). Env in `frontend/.env.local` (`.env.example`
+     documents it; everything `VITE_*` is public, so no secrets there).
+   - Pages: sign in / sign up / forgot + reset password; Dashboard (summary stats, allocation
+     donut by asset class or sector, totals-by-asset-class table); Holdings (type filter, click
+     through to open lots and FIFO matches); Transactions (add form with security search,
+     last-price prefill and "you hold N" on sells; ledger with soft delete and load-more).
+   - Decimal strings are sent as typed and only turned into numbers for display
+     (`src/lib/format.ts`). The trade time input is read as IST and sent as UTC. The backend
+     remains the only validator of the ledger; its 422 message is shown as-is.
+   - Verified: tsc clean, 23 vitest tests (IST conversion, decimal input, error flattening),
+     production build, sign-in page renders with no console errors, CORS from :5173 to the API
+     works, no horizontal scroll at 375 px. Signed-in pages not yet exercised with a real account.
 
 Out of scope for Phase 1: Excel import, statements, XIRR, tax, risk score.
+
+## Phase 2 progress
+User's choices (2026-09-29): import rules for Zerodha, Groww, Upstox/Angel One; LLM column-mapping
+fallback built now; statements as Excel + PDF. Build order: XIRR -> imports -> statements.
+
+1. ✅ XIRR (rule 9) -- `services/xirr.py`: Decimal-only bisection on NPV(r) = 0 with Excel's
+   actual/365 convention (bisection can't diverge; widens the bracket to 1,000,000x, returns None
+   when undefined: one-sided flows, everything on one day, or off the scale). BUY = -(qty x price
+   + charges), SELL = qty x price - charges, dated by IST day; open holdings add one final inflow
+   at today's value (cost when unpriced, same as the dashboard, flagged `includes_unpriced`).
+   `GET /analysis/xirr` gives portfolio + per security (closed positions included), with
+   `short_period` (< 365 days) so the UI can warn that annualising a few weeks exaggerates.
+   Tests: Microsoft's documented XIRR example (agrees to Excel's 1e-8 precision, and our root
+   has the smaller NPV), closed-form cases, leap year, undefined cases, and the endpoint against
+   an independent float solver. UI: XIRR card on the dashboard, XIRR column on holdings.
+2. ✅ Excel import (rule 7) -- run end to end by the user on 2026-10-06 (upload -> review ->
+   commit). Fixed on the way: `window.confirm()` is silently cancelled in some embedded browsers
+   (the Claude app's pane returns false in 1 ms), so all confirmations now use
+   `components/ConfirmButton.tsx` (two-step in-page confirm). LLM fallback verified live (2026-10-06): an unrecognisable file
+   ("Scrip / Ticker", "Txn Dt", "Dir.", 2-line preamble) mapped correctly in ~6 s; that run
+   also showed "Sale" was missing from the sell words (added, with tests).
+   - Storage: bucket `imports` (private, 5 MB, csv/xlsx) via migration `20261006100000`, RLS on
+     storage.objects: own `<user_id>/` folder only. The backend reads/writes with the *caller's*
+     JWT, no service-role key. Migration `20261006110000` adds `imports.profile`.
+   - `services/imports/`: `table.py` (read csv/xlsx to a string grid, header row = the row in the
+     first 40 matching most aliases, one alias table covers all brokers; profiles only label the
+     broker), `rows.py` (day-first dates, Excel serials, Indian number formats, value/qty when no
+     price, missing time -> 15:30 IST, cancelled orders and F&O auto-excluded, plain-English
+     issues), `llm.py` (Claude Opus 5.5 at low effort, structured output via `messages.parse`;
+     only the first 15 rows are sent; it returns column *names*, which are checked against the
+     real header before use; rows are then parsed by the same code; the UI discloses this),
+     `service.py` (security resolution ISIN > symbol/BSE code > exact name, preferring active and
+     NSE; duplicate-of-ledger rows get a non-blocking "Warning: " issue and need an explicit
+     confirm; commit locks every affected (user, security) in a fixed order, inserts with
+     `on conflict (import_row_id) do nothing`, runs `ledger_balance_ok` for each, rolls the whole
+     import back on any oversell).
+   - API `api/v1/imports.py`: POST (multipart), GET list/detail, PATCH row, POST commit
+     (idempotent), DELETE (soft discard). Same file twice -> 409 (server-side sha256).
+   - Verified: 20 parsing tests (Zerodha with preamble, Groww value-not-price + cancelled,
+     Upstox split date/time + total row, real .xlsx, invented LLM column names dropped); commit
+     SQL run on the live DB inside a rolled-back transaction (resolve, idempotent re-commit,
+     duplicate warning, oversell blocked; ledger unchanged afterwards).
+   - UI: Import page (drop zone, history) and review page (needs attention / ready / excluded,
+     inline row editor with security picker, include/exclude, sticky commit bar).
+3. ✅ Statements (Excel + PDF) -- `services/statements.py` lays out a `Statement` (summary +
+   tables + notes) as .xlsx (openpyxl, real numbers, Indian digit grouping) or PDF (fpdf2, A4
+   landscape, Helvetica so amounts read "Rs"). `api/v1/reports.py`: `GET /reports/holdings` and
+   `GET /reports/realised?fy=` with `format=xlsx|pdf`, streamed with Content-Disposition. Built from
+   the same FIFO/valuation/XIRR/tax functions as the screens. Download buttons on Holdings and Tax
+   (fetch with the bearer token -> blob, since a plain link can't send it).
+
+## Phase 3 progress
+1. ✅ Tax classifier (rule 8) -- `services/tax/`: `rules.py` (dated RuleSets; pick by *sale* date:
+   before / from 23 Jul 2024; s.50AA cut-off 1 Apr 2023; grandfathering cut-off 1 Feb 2018; 4% cess),
+   `engine.py` (classify security: stock/equity ETF/equity-oriented MF by AMFI category -> EQUITY;
+   gold/silver/international ETF -> OTHER listed; debt ETF/debt MF -> DEBT_FUND; bonds by listing;
+   uncertain categories flagged for the user. Classify lot: "held more than N months" = sold after
+   purchase + N months; equity 111A/112A rates, other LTCG s.112, other STCG at slab. Year summary:
+   net per bucket, short-term losses set off against slab gains first, then higher flat rates,
+   then other LTCG, equity LTCG last; long-term losses only against LTCG; then the s.112A
+   exemption; estimated tax + cess; slab gains reported, not taxed; losses carried shown.)
+   Not modelled, and said so to the user: slab tax, surcharge, pre-2024 indexation, the 31-Jan-2018
+   grandfathered cost, STT non-deductibility. Rules verified on incometaxindia.gov.in on 2026-10-07
+   (pages state "as amended by the Finance Act, 2026"; the Income-tax Act 2025 renumbers sections
+   but keeps these rates for 2026-27). `GET /tax/capital-gains?fy=`. 26 engine tests (incl. the
+   department's own SBI-shares illustrations) + endpoint/statement tests. UI: Tax page.
+2. LLM plain-language summary of the tax output -- not started.
+3. Dashboard polish, optional risk score -- not started.
 
 Later: Phase 2 is Excel upload with review step, downloadable P/L and holding statements, XIRR. Phase 3 is tax classifier plus LLM summary, dashboard polish, optional portfolio risk score.
 
@@ -164,6 +283,9 @@ cd backend && python3 -m venv .venv && source .venv/bin/activate && pip install 
 cp backend/.env.example backend/.env   # then fill in the real secrets, see comments in that file
 cd backend && source .venv/bin/activate && uvicorn app.main:app --reload
 cd backend && source .venv/bin/activate && pytest -q
+cd frontend && npm install && cp .env.example .env.local   # then fill in the publishable key
+cd frontend && npm run dev        # http://localhost:5173, needs the backend on :8000
+cd frontend && npm test && npm run build
 ```
 New migrations are applied with the Supabase MCP `apply_migration` tool (project: Securities Saathi,
 id `vmonemnomwyjwacagkuc`, region ap-south-1, org "purvansh playground") rather than the Supabase CLI,

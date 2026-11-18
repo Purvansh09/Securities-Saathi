@@ -10,5 +10,6 @@ import os
 
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_JWT_SECRET", "test-jwt-secret")
+os.environ.setdefault("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
 os.environ.setdefault("DATABASE_URL", "postgresql://user:pass@localhost:5432/testdb")
 os.environ.setdefault("INTERNAL_SYNC_SECRET", "test-internal-secret")

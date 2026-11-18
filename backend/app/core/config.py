@@ -14,9 +14,14 @@ class Settings(BaseSettings):
 
     supabase_url: str
     supabase_jwt_secret: str
+    # Public by design; only sent as the apikey header when fetching the JWKS (see core/auth.py).
+    supabase_publishable_key: str = ""
     database_url: str
     cors_origins: str = "http://localhost:5173"
     internal_sync_secret: str = ""
+    # Optional. Only the Excel-import fallback uses it (services/imports/llm.py); without it,
+    # files the rule-based mapper can't read fail with a clear message instead.
+    anthropic_api_key: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

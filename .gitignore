@@ -16,3 +16,6 @@ dist/
 
 # OS
 .DS_Store
+
+# Sync job logs (backend/scripts/run_daily_sync.ps1)
+backend/logs/

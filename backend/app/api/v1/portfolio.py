@@ -44,7 +44,7 @@ _SCALE = Decimal("0.000001")
 _POSITIONS_QUERY = """
     select t.id, t.security_id, t.txn_type, t.quantity, t.price, t.charges,
            t.executed_at, t.created_at,
-           s.isin, s.symbol, s.name, s.type, s.sector, s.metadata,
+           s.isin, s.symbol, s.name, s.type, s.sector, s.metadata, s.exchange,
            lp.price as latest_price, lp.price_date as latest_price_date
     from public.transactions t
     join public.securities s on s.id = t.security_id
@@ -64,13 +64,20 @@ def today_ist() -> date:
     return datetime.now(IST).date()
 
 
-async def _load_positions(conn: asyncpg.Connection, user_id: UUID, as_of: date) -> list[Position]:
-    rows = await conn.fetch(_POSITIONS_QUERY, user_id)
-
+async def fetch_ledger(conn: asyncpg.Connection, user_id: UUID) -> dict:
+    """The caller's live ledger, grouped by security_id, in FIFO order. Shared with
+    api/v1/analysis.py so XIRR reads exactly the same rows as the holdings."""
     by_security: dict = defaultdict(list)
-    for row in rows:
+    for row in await conn.fetch(_POSITIONS_QUERY, user_id):
         by_security[row["security_id"]].append(row)
+    return by_security
 
+
+async def _load_positions(conn: asyncpg.Connection, user_id: UUID, as_of: date) -> list[Position]:
+    return build_positions(await fetch_ledger(conn, user_id), as_of)
+
+
+def build_positions(by_security: dict, as_of: date) -> list[Position]:
     positions = []
     for security_id, sec_rows in by_security.items():
         first = sec_rows[0]
@@ -82,6 +89,7 @@ async def _load_positions(conn: asyncpg.Connection, user_id: UUID, as_of: date) 
             type=first["type"],
             sector=first["sector"],
             metadata=first["metadata"] or {},
+            exchange=first.get("exchange"),
         )
         fifo = match_fifo(
             LedgerEntry(
